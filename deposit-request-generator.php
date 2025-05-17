@@ -12,6 +12,7 @@ class DRG_Generator {
         add_action('admin_menu', [$this, 'add_menu']);
         add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
         add_action('wp_ajax_drp_search_clients', [$this, 'ajax_search_clients']);
+        add_action('wp_ajax_drp_get_client', [$this, 'ajax_get_client']);
     }
 
     public function add_menu() {
@@ -62,6 +63,19 @@ class DRG_Generator {
             ];
         }
         wp_send_json($results);
+    }
+
+    public function ajax_get_client() {
+        check_ajax_referer('drp_search_nonce', 'nonce');
+        $id = intval($_POST['id'] ?? 0);
+        $user = get_userdata($id);
+        if (!$user) wp_send_json_error('Invalid user');
+        $data = [
+            'email'           => $user->user_email,
+            'address'         => get_user_meta($id, 'client_address', true),
+            'matter_reference'=> get_user_meta($id, 'matter_reference', true),
+        ];
+        wp_send_json($data);
     }
 
     public function render_page() {

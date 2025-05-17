@@ -21,6 +21,21 @@ jQuery(function($){
     }
   });
 
+  $('select.drp-select2').on('select2:select', function(e){
+    const id = $(this).val();
+    $.post(drp_vars.ajax_url, {
+      action: 'drp_get_client',
+      nonce: drp_vars.nonce,
+      id: id
+    }).done(data => {
+      $('[name="client_email"]').val(data.email);
+      $('[name="client_address"]').val(data.address);
+      $('[name="matter_reference"]').val(data.matter_reference);
+    });
+  }).on('select2:clear', function(){
+    $('[name="client_email"], [name="client_address"], [name="matter_reference"]').val('');
+  });
+
   function recalc() {
     let deposit = 0, gstTotal = 0;
     $('#payment-table tbody tr').each(function(){

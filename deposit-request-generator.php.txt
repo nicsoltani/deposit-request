@@ -1,0 +1,161 @@
+<?php
+/*
+ * Plugin Name: Deposit Request Generator
+ * Description: Admin tool to generate deposit requests for clients, with live user search, dynamic item table, and print-friendly output.
+ * Version: 4.1
+ * Author: Soltani & Associates
+ */
+if (!defined('ABSPATH')) exit;
+
+class DRG_Generator {
+    public function __construct() {
+        add_action('admin_menu', [$this, 'add_menu']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_assets']);
+        add_action('wp_ajax_drp_search_clients', [$this, 'ajax_search_clients']);
+    }
+
+    public function add_menu() {
+        add_menu_page(
+            'Deposit Request', 'Deposit Request', 'manage_options',
+            'deposit-request', [$this, 'render_page'],
+            'dashicons-portfolio', 20
+        );
+    }
+
+    public function enqueue_assets($hook_suffix) {
+    // Load everywhere in admin for reliability, or you can restore your page check if you like.
+    wp_enqueue_style('drg-style', plugins_url('drg-style.css', __FILE__), [], '4.1');
+    wp_enqueue_style('drp-select2', 'https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/css/select2.min.css', [], '4.1.0-rc.0');
+    wp_enqueue_style('drp-flatpickr', 'https://cdn.jsdelivr.net/npm/flatpickr/dist/flatpickr.min.css', [], '4.6.13');
+
+    wp_enqueue_script('drp-select2', 'https://cdn.jsdelivr.net/npm/select2@4.1.0-rc.0/dist/js/select2.min.js', ['jquery'], '4.1.0-rc.0', true);
+    wp_enqueue_script('drp-flatpickr', 'https://cdn.jsdelivr.net/npm/flatpickr', ['jquery'], '4.6.13', true);
+
+    wp_enqueue_script('drg-script', plugins_url('drg-script.js', __FILE__), ['jquery', 'drp-select2', 'drp-flatpickr'], '4.1', true);
+
+    wp_localize_script('drg-script', 'drp_vars', [
+        'ajax_url' => admin_url('admin-ajax.php'),
+        'nonce'    => wp_create_nonce('drp_search_nonce'),
+    ]);
+}
+
+
+
+    public function ajax_search_clients() {
+        check_ajax_referer('drp_search_nonce', 'nonce');
+        $term = sanitize_text_field($_POST['term'] ?? '');
+        if (strlen($term) < 1) wp_send_json([]);
+        $args = [
+            'search'         => '*' . esc_sql($term) . '*',
+            'search_columns' => ['user_login', 'user_email', 'display_name'],
+            'number'         => 50,
+            'orderby'        => 'display_name',
+            'order'          => 'ASC',
+        ];
+        $query = new WP_User_Query($args);
+        $users = $query->get_results();
+        $results = [];
+        foreach ($users as $user) {
+            $results[] = [
+                'id'   => $user->ID,
+                'text' => sprintf('%s (%s)', $user->display_name, $user->user_email),
+            ];
+        }
+        wp_send_json($results);
+    }
+
+    public function render_page() {
+        if (!current_user_can('manage_options')) wp_die('Insufficient permissions');
+        echo '<div class="drp-wrap"><h1>Deposit Request Generator</h1>';
+        $this->form();
+        if (isset($_POST['generate_deposit'])) $this->output();
+        echo '</div>';
+    }
+
+    private function form() {
+        $nonce = wp_nonce_field('drp_generate', 'drp_nonce_field', true, false);
+        echo '<form method="post" class="drp-form">' . $nonce;
+        echo '<h2>Client Details</h2>
+            <p><label>Select Client: <select name="client_id" class="drp-select2" required><option></option></select></label></p>
+            <p><label>Client Email: <input type="email" name="client_email" required></label></p>
+            <p><label>Address: <textarea name="client_address" rows="2" required></textarea></label></p>
+            <p><label><input type="checkbox" id="drp-in-australia" name="in_australia"> In Australia</label></p>
+            <p><label>Matter Reference: <input type="text" name="matter_reference" required></label></p>
+            <h2>Dates</h2>
+            <p><label>Date: <input type="text" id="drp-date" name="date" required></label></p>
+            <p><label>Due Date: <input type="text" id="drp-due-date" name="due_date" required></label></p>
+            <h2>Payment Details</h2>
+            <table id="payment-table"><thead><tr><th>Type</th><th>Description</th><th>Qty</th><th>Amt</th><th>GST</th><th>Total</th><th></th></tr></thead><tbody>
+            <tr>
+                <td><select name="payment_type[]"><option>Disbursement</option><option>Fees</option><option>Costs</option></select></td>
+                <td><input type="text" name="description[]" placeholder="Description" required></td>
+                <td><input type="number" name="quantity[]" value="1" min="1" required></td>
+                <td><input type="number" name="amount[]" step="0.01" required></td>
+                <td><input type="number" name="gst[]" step="0.01" readonly></td>
+                <td><input type="number" name="total[]" step="0.01" readonly></td>
+                <td><button type="button" class="remove-row">×</button></td>
+            </tr></tbody><tfoot>
+            <tr><td colspan="5" style="text-align:right;">Deposit Amount:</td><td colspan="2"><span id="display-deposit" class="total-display">$0.00</span></td></tr>
+            <tr><td colspan="5" style="text-align:right;">GST Total:</td><td colspan="2"><span id="display-gst" class="total-display">$0.00</span></td></tr>
+            <tr><td colspan="5" style="text-align:right;">Grand Total:</td><td colspan="2"><span id="display-grand" class="total-display">$0.00</span></td></tr>
+            </tfoot></table>
+            <button type="button" id="add-row">Add Row</button>
+            <p><input type="submit" name="generate_deposit" class="button button-primary" value="Generate Deposit"></p>
+        </form>';
+    }
+
+    private function output() {
+        if (!isset($_POST['drp_nonce_field']) || !wp_verify_nonce($_POST['drp_nonce_field'], 'drp_generate')) wp_die('Security check failed');
+        $client_id      = intval($_POST['client_id']);
+        $user           = get_userdata($client_id);
+        $client_name    = sanitize_text_field($user->display_name ?? '');
+        $client_email   = sanitize_email($_POST['client_email']);
+        $client_address = sanitize_textarea_field($_POST['client_address']);
+        $in_aus         = isset($_POST['in_australia']);
+        $matter_ref     = sanitize_text_field($_POST['matter_reference']);
+        $date           = sanitize_text_field($_POST['date']);
+        $due_date       = sanitize_text_field($_POST['due_date']);
+        $types = array_map('sanitize_text_field', $_POST['payment_type']);
+        $descs = array_map('sanitize_text_field', $_POST['description']);
+        $qtys  = array_map('intval', $_POST['quantity']);
+        $amts  = array_map('floatval', $_POST['amount']);
+        $deposit_total = 0;
+        $gst_total = 0;
+        $rows_html = '';
+        foreach ($types as $i => $type) {
+            $qty  = max(1, $qtys[$i]);
+            $amt  = $amts[$i];
+            $gst  = ($type === 'Disbursement') ? 0 : ($amt * 0.10);
+            if (!$in_aus) $gst = 0;
+            $line = ($amt + $gst) * $qty;
+            $deposit_total += $amt * $qty;
+            $gst_total     += $gst * $qty;
+            $rows_html    .= sprintf(
+                '<tr><td>%s</td><td>%s</td><td>%d</td><td>%.2f</td><td>%.2f</td><td>%.2f</td></tr>',
+                esc_html($type), esc_html($descs[$i]), $qty, $amt, $gst, $line
+            );
+        }
+        echo '<div class="deposit-output" style="margin-top:30px;padding:20px;border:1px solid #ccc;">';
+        echo '<h2>DEPOSIT REQUEST</h2>';
+        echo sprintf(
+            '<p><strong>Client:</strong> %s | <strong>Email:</strong> %s | <strong>Address:</strong> %s</p>',
+            esc_html($client_name), esc_html($client_email), esc_html($client_address)
+        );
+        echo sprintf(
+            '<p><strong>Date:</strong> %s | <strong>Due Date:</strong> %s | <strong>Ref:</strong> %s</p>',
+            esc_html($date), esc_html($due_date), esc_html($matter_ref)
+        );
+        echo '<table border="1" cellpadding="8" cellspacing="0" width="100%">' .
+             '<tr><th>Type</th><th>Description</th><th>Qty</th><th>Amt</th><th>GST</th><th>Total</th></tr>' .
+             $rows_html .
+             '</table>';
+        echo sprintf(
+            '<p><strong>Deposit:</strong> $%.2f AUD | <strong>GST Total:</strong> $%.2f | <strong>Grand Total:</strong> $%.2f</p>',
+            $deposit_total, $gst_total, $deposit_total + $gst_total
+        );
+        echo '<p><a class="button button-primary" href="javascript:window.print()">Print or Save PDF</a></p>';
+        echo '</div>';
+    }
+}
+
+new DRG_Generator();
